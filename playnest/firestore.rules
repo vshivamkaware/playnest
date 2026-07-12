@@ -1,9 +1,29 @@
 rules_version = '2';
+
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Check if the authenticated user is an admin
+
+    // ─────────────────────────────────────────────────────────────
+    // HELPER FUNCTIONS
+    // ─────────────────────────────────────────────────────────────
+
+    /// Returns true if the current user is authenticated.
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    /// Returns true if the current user is the document owner.
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    /// Returns true if the current user is an admin.
+    /// Admin is determined by:
+    ///   1. The hardcoded system admin email (bootstrap admin)
+    ///   2. The `isAdmin` flag on the user document
+    ///   3. The `role` field set to 'admin' on the user document
     function isAdmin() {
-      return request.auth != null && (
+      return isAuthenticated() && (
         request.auth.token.email == 'admin@sv.in' ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
          (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true ||
@@ -11,47 +31,129 @@ service cloud.firestore {
       );
     }
 
-    // Users collection
+    /// Returns true if the incoming data does NOT attempt to modify
+    /// any of the protected privilege fields.
+    function noPrivilegeEscalation() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin', 'role', 'banned', 'isBanned']);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // USERS COLLECTION
+    // Each document represents a registered user with their
+    // device binding, admin status, and purchased videos.
+    //
+    // Document ID: Firebase Auth UID
+    // ─────────────────────────────────────────────────────────────
     match /users/{userId} {
-      // Anyone can read their own doc, admins can read all
-      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
-      
-      // Users can create their own doc. They can only set isAdmin if they are the designated system admin email.
-      allow create: if request.auth != null && request.auth.uid == userId && 
-        (!request.resource.data.keys().hasAny(['isAdmin', 'role']) || isAdmin() || request.auth.token.email == 'admin@sv.in');
-        
-      // Users can update their own doc, but cannot elevate privileges unless they are the system admin.
-      allow update: if request.auth != null && (
-        isAdmin() || 
-        (request.auth.uid == userId && 
-         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin', 'role', 'banned']) || request.auth.token.email == 'admin@sv.in')
-        )
-      );
-      
-      allow delete: if request.auth != null && isAdmin();
-    }
 
-    // Videos collection
-    match /videos/{videoId} {
-      allow read: if isAdmin() || (request.auth != null && resource.data.get("isHidden", false) == false);
-      allow write: if isAdmin();
-    }
+      // READ: Users can read their own document. Admins can read all.
+      allow read: if isOwner(userId) || isAdmin();
 
-    // Payment Requests collection
-    match /paymentRequests/{requestId} {
-      // Users can create a request if it's for themselves
-      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
-      // Users can read their own requests, admins can read all
-      allow read: if request.auth != null && (request.auth.uid == resource.data.userId || isAdmin());
-      // Only admins can update the request (to approve/reject)
-      allow update: if isAdmin();
+      // CREATE: Users can only create their own document.
+      // Privilege fields (isAdmin, role) can only be set by the
+      // system admin email during bootstrap or by existing admins.
+      allow create: if isOwner(userId) &&
+        (!request.resource.data.keys().hasAny(['isAdmin', 'role']) ||
+         isAdmin() ||
+         request.auth.token.email == 'admin@sv.in');
+
+      // UPDATE: Users can update their own document but cannot
+      // escalate privileges. Admins can update any document.
+      allow update: if isAdmin() ||
+        (isOwner(userId) && noPrivilegeEscalation());
+
+      // DELETE: Only admins can delete user documents.
       allow delete: if isAdmin();
     }
 
-    // Settings collection
-    match /settings/{docId} {
-      allow read: if request.auth != null; // Any authenticated user can read settings (e.g. adminUpiId)
+    // ─────────────────────────────────────────────────────────────
+    // VIDEOS COLLECTION
+    // Each document represents a video with metadata, Google Drive
+    // link, category, pricing, and visibility status.
+    //
+    // Document ID: Auto-generated
+    // ─────────────────────────────────────────────────────────────
+    match /videos/{videoId} {
+
+      // READ: Admins can read all videos (including hidden).
+      //        Users can only read videos that are NOT hidden.
+      allow read: if isAdmin() ||
+        (isAuthenticated() && resource.data.get('isHidden', false) == false);
+
+      // WRITE: Only admins can create, update, or delete videos.
       allow write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // PAYMENT REQUESTS COLLECTION
+    // Each document represents a user's payment submission for a
+    // premium video, pending admin approval.
+    //
+    // Document ID: Auto-generated
+    // ─────────────────────────────────────────────────────────────
+    match /paymentRequests/{requestId} {
+
+      // CREATE: Users can create a payment request only for themselves.
+      allow create: if isAuthenticated() &&
+        request.resource.data.userId == request.auth.uid;
+
+      // READ: Users can read their own requests. Admins can read all.
+      allow read: if isAuthenticated() &&
+        (request.auth.uid == resource.data.userId || isAdmin());
+
+      // UPDATE: Only admins can approve or reject payment requests.
+      allow update: if isAdmin();
+
+      // DELETE: Only admins can delete payment requests.
+      allow delete: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // SETTINGS COLLECTION
+    // App-wide configuration managed by admins.
+    // Currently stores: payment UPI ID.
+    //
+    // Documents: 'payment' (adminUpiId)
+    // ─────────────────────────────────────────────────────────────
+    match /settings/{docId} {
+
+      // READ: Any authenticated user can read settings
+      //        (needed to display UPI ID on payment screen).
+      allow read: if isAuthenticated();
+
+      // WRITE: Only admins can modify settings.
+      allow write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // CATEGORIES COLLECTION (Future)
+    // Stores video categories with ordering.
+    //
+    // Document ID: Auto-generated
+    // ─────────────────────────────────────────────────────────────
+    match /categories/{categoryId} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // WATCH HISTORY COLLECTION (Future)
+    // Tracks user watch progress for "Continue Watching" feature.
+    //
+    // Path: watchHistory/{userId}/videos/{videoId}
+    // ─────────────────────────────────────────────────────────────
+    match /watchHistory/{userId}/videos/{videoId} {
+      allow read, write: if isOwner(userId);
+    }
+
+    // ─────────────────────────────────────────────────────────────
+    // FAVORITES COLLECTION (Future)
+    // Stores user's favorited/bookmarked videos.
+    //
+    // Path: favorites/{userId}/videos/{videoId}
+    // ─────────────────────────────────────────────────────────────
+    match /favorites/{userId}/videos/{videoId} {
+      allow read, write: if isOwner(userId);
     }
   }
 }
