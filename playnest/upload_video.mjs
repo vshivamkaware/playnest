@@ -3,12 +3,7 @@ import { getAuth, signInWithEmailAndPassword } from "firebase/auth";
 import { getFirestore, collection, addDoc, serverTimestamp } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "AIzaSyA0-CxoKa9e8o2nEdD5dfWlPSx7xIimHE4",
-  authDomain: "playnest-mvp-2026.firebaseapp.com",
-  projectId: "playnest-mvp-2026",
-  storageBucket: "playnest-mvp-2026.firebasestorage.app",
-  messagingSenderId: "947451001451",
-  appId: "1:947451001451:web:ec6891132a1d5b846b8f2e"
+ use own api
 };
 
 const app = initializeApp(firebaseConfig);
