@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Check if the authenticated user is an admin
+    function isAdmin() {
+      return request.auth != null && (
+        request.auth.token.email == 'admin@sv.in' ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+         (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('isAdmin', false) == true ||
+          get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', '') == 'admin'))
+      );
+    }
+
+    // Users collection
+    match /users/{userId} {
+      // Anyone can read their own doc, admins can read all
+      allow read: if request.auth != null && (request.auth.uid == userId || isAdmin());
+      
+      // Users can create their own doc. They can only set isAdmin if they are the designated system admin email.
+      allow create: if request.auth != null && request.auth.uid == userId && 
+        (!request.resource.data.keys().hasAny(['isAdmin', 'role']) || isAdmin() || request.auth.token.email == 'admin@sv.in');
+        
+      // Users can update their own doc, but cannot elevate privileges unless they are the system admin.
+      allow update: if request.auth != null && (
+        isAdmin() || 
+        (request.auth.uid == userId && 
+         (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['isAdmin', 'role', 'banned']) || request.auth.token.email == 'admin@sv.in')
+        )
+      );
+      
+      allow delete: if request.auth != null && isAdmin();
+    }
+
+    // Videos collection
+    match /videos/{videoId} {
+      allow read: if isAdmin() || (request.auth != null && resource.data.get("isHidden", false) == false);
+      allow write: if isAdmin();
+    }
+
+    // Payment Requests collection
+    match /paymentRequests/{requestId} {
+      // Users can create a request if it's for themselves
+      allow create: if request.auth != null && request.resource.data.userId == request.auth.uid;
+      // Users can read their own requests, admins can read all
+      allow read: if request.auth != null && (request.auth.uid == resource.data.userId || isAdmin());
+      // Only admins can update the request (to approve/reject)
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Settings collection
+    match /settings/{docId} {
+      allow read: if request.auth != null; // Any authenticated user can read settings (e.g. adminUpiId)
+      allow write: if isAdmin();
+    }
+  }
+}
